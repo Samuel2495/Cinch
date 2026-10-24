@@ -1,0 +1,28 @@
+
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+.yarn
+
+# Miscellaneous
+.DS_Store
+*.pem
+
+# Generated files and local development plugins
+my-plugin
+dev-plugin
+/dist/
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Packed plugin
+plugin.zip
