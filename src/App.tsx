@@ -1,4 +1,3 @@
-
 import { useEffect, useRef, useState } from "react"
 import { framer } from "@framer/plugin"
 import {
@@ -8,6 +7,8 @@ import {
   type OutputFormat,
 } from "./compression"
 import "./App.css"
+import VideoTab from "./tabs/VideoTab"
+import PageTab from "./components/PageTab"
 
 const MAX_IMAGES = 5
 
@@ -57,25 +58,6 @@ function getSavings(originalSize: number, compressedSize: number) {
 function createId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
-
-function BrandMark() {
-  return (
-    <div className="brand-mark" aria-hidden="true">
-      <svg viewBox="0 0 32 32" fill="none">
-        <path d="M7 8.5h18v5H7zM7 18.5h11v5H7z" fill="currentColor" />
-        <path
-          d="m21 17 5 4-5 4"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    </div>
-  )
-}
-
-
 
 function BeforeAfterPreview({
   originalUrl,
@@ -195,8 +177,53 @@ function BeforeAfterPreview({
 }
 
 
+function syncRange(el: HTMLInputElement) {
+  const min = Number(el.min || 0)
+  const max = Number(el.max || 100)
+  const value = Number(el.value)
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
+  el.style.setProperty("--pct", `${pct}%`)
+}
+
+function syncAllRanges() {
+  document
+    .querySelectorAll<HTMLInputElement>('input[type="range"]')
+    .forEach(syncRange)
+}
+
+/** Keeps every slider's gradient fill in step with its value. */
+function useGradientRanges() {
+  useEffect(() => {
+    let frame = 0
+    const schedule = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(syncAllRanges)
+    }
+
+    syncAllRanges()
+
+    const events = ["input", "change", "click", "pointerup"]
+    events.forEach((name) => document.addEventListener(name, schedule, true))
+
+    // Catches sliders that mount later (tab switches, format changes).
+    const observer = new MutationObserver(schedule)
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    return () => {
+      cancelAnimationFrame(frame)
+      events.forEach((name) =>
+        document.removeEventListener(name, schedule, true),
+      )
+      observer.disconnect()
+    }
+  }, [])
+}
+
 export function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Synchronous lock: state updates are async, so a fast double-click could
+  // otherwise call framer.addImage twice before `addingId` is set.
+  const addingLockRef = useRef(false)
   const imagesRef = useRef<QueueItem[]>([])
 
   const [images, setImages] = useState<QueueItem[]>([])
@@ -207,6 +234,9 @@ export function App() {
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<"images" | "videos" | "page">("images")
+
+  useGradientRanges()
 
   // Keep the latest queue available to the unmount cleanup.
   imagesRef.current = images
@@ -479,11 +509,14 @@ export function App() {
     if (
       !item.compressedBlob ||
       !resultIsCurrent(item) ||
-      addingId
+      addingId ||
+      addingLockRef.current
     ) {
       return
     }
 
+    // One click = one image layer. Block re-entry until this call finishes.
+    addingLockRef.current = true
     setAddingId(item.id)
     setError(null)
     setStatus(null)
@@ -495,11 +528,36 @@ export function App() {
         lastModified: Date.now(),
       })
 
-      await framer.addImage({
+      // Work out a sensible on-canvas size (aspect ratio kept, max 800px wide)
+      // so one layer lands inside the visible area instead of off-screen.
+      const bitmap = await createImageBitmap(item.compressedBlob)
+      const naturalWidth = bitmap.width
+      const naturalHeight = bitmap.height
+      bitmap.close()
+      const scale = Math.min(1, 800 / naturalWidth)
+      const layerWidth = Math.max(1, Math.round(naturalWidth * scale))
+      const layerHeight = Math.max(1, Math.round(naturalHeight * scale))
+
+      // Upload once, then create exactly ONE frame that uses the image.
+      const asset = await framer.uploadImage({
         image: optimizedFile,
         name: filename,
         altText: item.file.name.replace(/\.[^/.]+$/, ""),
       })
+
+      const layer = await framer.createFrameNode({
+        name: filename,
+        width: `${layerWidth}px`,
+        height: `${layerHeight}px`,
+        backgroundImage: asset,
+      })
+
+      if (!layer) {
+        throw new Error("Framer did not create the image layer.")
+      }
+
+      // Bring the new layer into view so it is never "out of view".
+      await layer.zoomIntoView()
 
       setStatus(`${item.file.name} added to your Framer canvas.`)
     } catch (addError) {
@@ -509,6 +567,7 @@ export function App() {
           : `Could not add ${item.file.name} to Framer. Try downloading it instead.`,
       )
     } finally {
+      addingLockRef.current = false
       setAddingId(null)
     }
   }
@@ -521,18 +580,57 @@ export function App() {
     <div className="cinch-app">
       <header className="cinch-header">
         <div className="brand-lockup">
-          <BrandMark />
+          <img
+            src="/cinch_logo.png"
+            alt="Cinch logo"
+            className="brand-mark-image"
+          />
+
           <div>
-            <div className="brand-name">CINCH<span>.</span></div>
-            <div className="brand-caption">IMAGE OPTIMIZER</div>
+            <div className="brand-name">
+              CINCH<span>.</span>
+            </div>
+            <div className="brand-caption">MEDIA OPTIMIZER</div>
           </div>
         </div>
+
         <div className="local-pill">
           <span className="local-dot" /> LOCAL
         </div>
       </header>
 
       <main className="cinch-main">
+        <div className="media-tabs" role="tablist" aria-label="Media type">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "images"}
+            className={`media-tab${activeTab === "images" ? " media-tab-active" : ""}`}
+            onClick={() => setActiveTab("images")}
+          >
+            <span aria-hidden="true">▧</span> Images
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "videos"}
+            className={`media-tab${activeTab === "videos" ? " media-tab-active" : ""}`}
+            onClick={() => setActiveTab("videos")}
+          >
+            <span aria-hidden="true">▷</span> Videos
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "page"}
+            className={`media-tab${activeTab === "page" ? " media-tab-active" : ""}`}
+            onClick={() => setActiveTab("page")}
+          >
+            <span aria-hidden="true">▤</span> Page
+          </button>
+        </div>
+
+        <div className="media-tab-content" hidden={activeTab !== "images"}>
         <div className="intro-kicker">
           <span /> THE LIGHTER SIDE OF DESIGN
         </div>
@@ -544,7 +642,6 @@ export function App() {
         <p className="intro-copy">
           Make images lighter before they land in your project.
         </p>
-
         <label
           className={`dropzone${dragging ? " dropzone-active" : ""}${images.length >= MAX_IMAGES ? " dropzone-full" : ""}`}
           onDragOver={(event) => {
@@ -718,7 +815,10 @@ export function App() {
                           <button
                             className="primary-button add-button"
                             type="button"
-                            onClick={() => handleAddToFramer(item)}
+                            onClick={(event) => {
+                              event.currentTarget.blur()
+                              void handleAddToFramer(item)
+                            }}
                             disabled={addingId !== null}
                           >
                             {addingId === item.id
@@ -784,14 +884,14 @@ export function App() {
                 </div>
                 <input
                   id="quality-slider"
-                  className="quality-slider"
                   type="range"
-                  min="10"
-                  max="100"
-                  step="1"
+                  className="quality-slider"
+                  min={0}
+                  max={100}
                   value={quality}
-                  disabled={format === "png" || isCompressing}
-                  onChange={(event) => setQuality(Number(event.currentTarget.value))}
+                  disabled={format === "png"}
+                  aria-disabled={format === "png"}
+                  onChange={(e) => setQuality(Number(e.target.value))}
                 />
                 <div className="slider-captions">
                   <span>Smaller file</span>
@@ -906,6 +1006,15 @@ export function App() {
             <strong>Your images stay yours.</strong> Compression runs locally. No external compression service.
           </span>
         </footer>
+        </div>
+
+        <div className="media-tab-content" hidden={activeTab !== "videos"}>
+          <VideoTab />
+        </div>
+
+        <div className="media-tab-content" hidden={activeTab !== "page"}>
+          <PageTab active={activeTab === "page"} />
+        </div>
       </main>
     </div>
   )
